@@ -65,13 +65,6 @@ public class ClonedChunkSection {
         }
 
         if (section == null) {
-            // An all-air section (e.g. inside a large underground cavity) has no
-            // storageArrays entry on the server. Falling back straight to EMPTY_SECTION
-            // would leave hasSky=false, so getLightArray(Sky) returns null and
-            // WorldSlice.getLightLevel falls back to defaultLightValues[Sky]=15 (full
-            // bright), rendering the underground cavity as if sunlit. Instead build an
-            // EBS carrying a real sky-light array, filled per column with
-            // canBlockSeeTheSky ? 15 : 0, matching vanilla's semantics for null sections.
             section = buildEmptySectionWithSkyLight(chunk, pos);
         }
 
@@ -85,6 +78,42 @@ public class ClonedChunkSection {
         fillBiomeData(chunk);
 
         this.sectionLightData = BlockLightProvider.getInstance().prepareSectionData(chunk, pos.y);
+    }
+
+    /**
+     * Build a section with no blocks, with the sky light that {@link Chunk#getSavedLightValue} returns for a null
+     * section: 15 where {@link Chunk#canBlockSeeTheSky} returns true, else 0. When {@link Chunk#canBlockSeeTheSky}
+     * returns true in every column, return {@link #EMPTY_SECTION}. {@link #EMPTY_SECTION} has no sky light array.
+     */
+    private static ExtendedBlockStorage buildEmptySectionWithSkyLight(Chunk chunk, ChunkSectionPos pos) {
+        final int minY = pos.getMinY();
+
+        // canBlockSeeTheSky() compares y with the column's height map. The section has no blocks, so the comparison
+        // has one result for every y of the section. Compare at minY only.
+        boolean hasBuriedColumn = false;
+        for (int lz = 0; lz < SECTION_BLOCK_LENGTH && !hasBuriedColumn; lz++) {
+            for (int lx = 0; lx < SECTION_BLOCK_LENGTH; lx++) {
+                if (!chunk.canBlockSeeTheSky(lx, minY, lz)) {
+                    hasBuriedColumn = true;
+                    break;
+                }
+            }
+        }
+        // in a world with sky, `WorldSlice.getLightLevel()` returns 15 for a section with no sky light array
+        if (!hasBuriedColumn) {
+            return EMPTY_SECTION;
+        }
+
+        final ExtendedBlockStorage section = new ExtendedBlockStorage(minY, true);
+        for (int lz = 0; lz < SECTION_BLOCK_LENGTH; lz++) {
+            for (int lx = 0; lx < SECTION_BLOCK_LENGTH; lx++) {
+                final int skyLight = chunk.canBlockSeeTheSky(lx, minY, lz) ? EnumSkyBlock.Sky.defaultLightValue : 0;
+                for (int ly = 0; ly < SECTION_BLOCK_LENGTH; ly++) {
+                    section.setExtSkylightValue(lx, ly, lz, skyLight);
+                }
+            }
+        }
+        return section;
     }
 
     private void fillBiomeData(Chunk chunk) {
@@ -138,58 +167,6 @@ public class ClonedChunkSection {
             return ((FLSubChunk) data).fl$getFluid(x, y, z);
         }
         return null;
-    }
-
-    /**
-     * Builds an EBS with correct sky light for an all-air section, fixing underground
-     * empty sections being rendered at full sky brightness.
-     *
-     * Background: a large underground cavity (e.g. a mega-hall) can carve a whole
-     * 16x16x16 section to pure air, so the server has no storageArrays entry for it
-     * (null). Falling back to EMPTY_SECTION (hasSky=false) would make getLightArray(Sky)
-     * return null, and WorldSlice.getLightLevel falls back to defaultLightValues[Sky]=15
-     * (full bright) for any null light array -- an underground cavity would look sunlit,
-     * while vanilla returns canBlockSeeTheSky ? 15 : 0 for null sections.
-     *
-     * Performance: ordinary sky sections above the surface are also all-air, but every
-     * column sees the sky (canBlockSeeTheSky is true), so the default 15 is already
-     * correct; the fast path returns EMPTY_SECTION with no cost. Only empty sections
-     * containing underground columns (cavities / large caves) get a real EBS whose
-     * skylight is filled per column with 15 (exposed) / 0 (buried). init runs on the
-     * main thread (WorldSlice.prepare), so the chunk's height map is safe to read.
-     */
-    private static ExtendedBlockStorage buildEmptySectionWithSkyLight(
-            Chunk chunk, ChunkSectionPos pos) {
-        final int yBase = ChunkSectionPos.getBlockCoord(pos.y);
-
-        boolean anyUnderground = false;
-        for (int lz = 0; lz < SECTION_BLOCK_LENGTH && !anyUnderground; lz++) {
-            for (int lx = 0; lx < SECTION_BLOCK_LENGTH; lx++) {
-                if (!chunk.canBlockSeeTheSky(lx, yBase, lz)) {
-                    anyUnderground = true;
-                    break;
-                }
-            }
-        }
-        if (!anyUnderground) {
-            // Whole section is exposed to sky: default skylight 15 is correct, no fill needed.
-            return EMPTY_SECTION;
-        }
-
-        final ExtendedBlockStorage section = new ExtendedBlockStorage(yBase, true);
-        for (int lz = 0; lz < SECTION_BLOCK_LENGTH; lz++) {
-            for (int lx = 0; lx < SECTION_BLOCK_LENGTH; lx++) {
-                // An empty section has no blocks, so every cell in a column sees the sky
-                // identically (based on the column's top height); check once at the section
-                // floor: exposed -> 15, buried -> 0.
-                final boolean seeSky = chunk.canBlockSeeTheSky(lx, yBase, lz);
-                final int value = seeSky ? 15 : 0;
-                for (int ly = 0; ly < SECTION_BLOCK_LENGTH; ly++) {
-                    section.setExtSkylightValue(lx, ly, lz, value);
-                }
-            }
-        }
-        return section;
     }
 
     public NibbleArray getLightArray(EnumSkyBlock type) {
